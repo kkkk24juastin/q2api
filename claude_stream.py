@@ -136,7 +136,7 @@ class ClaudeStreamHandler:
                             self.content_block_started = True
                             self.content_block_stop_sent = False
                             self.in_think_block = True
-                            pos = think_start + 7  # Skip <thinking>
+                            pos = think_start + 10  # Skip <thinking>
                         else:
                             # No <thinking> found, send remaining as text
                             remaining = self.think_buffer[pos:]
@@ -163,7 +163,7 @@ class ClaudeStreamHandler:
                             self.content_block_stop_sent = True
                             self.content_block_start_sent = False
                             self.in_think_block = False
-                            pos = think_end + 8  # Skip </thinking>
+                            pos = think_end + 11  # Skip </thinking>
                         else:
                             # No </thinking> yet, send as thinking
                             remaining = self.think_buffer[pos:]
