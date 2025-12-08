@@ -127,8 +127,19 @@ def convert_tool(tool: ClaudeTool) -> Dict[str, Any]:
         }
     }
 
-def merge_user_messages(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Merge consecutive user messages, keeping only the last 2 messages' images."""
+def merge_user_messages(messages: List[Dict[str, Any]], hint: str = THINKING_HINT) -> Dict[str, Any]:
+    """Merge consecutive user messages, keeping only the last 2 messages' images.
+    
+    IMPORTANT: This function properly merges toolResults from all messages to prevent
+    losing tool execution history, which would cause infinite loops.
+    
+    When merging messages that contain thinking hints, removes duplicate hints and 
+    ensures only one hint appears at the end of the merged content.
+    
+    Args:
+        messages: List of user messages to merge
+        hint: The thinking hint string to deduplicate
+    """
     if not messages:
         return {}
     
@@ -137,30 +148,57 @@ def merge_user_messages(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
     base_origin = None
     base_model = None
     all_images = []
+    all_tool_results = []  # Collect toolResults from all messages
     
     for msg in messages:
         content = msg.get("content", "")
+        msg_ctx = msg.get("userInputMessageContext", {})
+        
+        # Initialize base context from first message
         if base_context is None:
-            base_context = msg.get("userInputMessageContext", {})
+            base_context = msg_ctx.copy() if msg_ctx else {}
+            # Remove toolResults from base to merge them separately
+            if "toolResults" in base_context:
+                all_tool_results.extend(base_context.pop("toolResults"))
+        else:
+            # Collect toolResults from subsequent messages
+            if "toolResults" in msg_ctx:
+                all_tool_results.extend(msg_ctx["toolResults"])
+        
         if base_origin is None:
             base_origin = msg.get("origin", "CLI")
         if base_model is None:
             base_model = msg.get("modelId")
         
+        # Remove thinking hint from individual message content to avoid duplication
+        # The hint will be added once at the end of the merged content
         if content:
-            all_contents.append(content)
+            content_cleaned = content.replace(hint, "").strip()
+            if content_cleaned:
+                all_contents.append(content_cleaned)
         
         # Collect images from each message
         msg_images = msg.get("images")
         if msg_images:
             all_images.append(msg_images)
     
+    # Merge content and ensure thinking hint appears only once at the end
+    merged_content = "\n\n".join(all_contents)
+    # Check if any of the original messages had the hint (indicating thinking was enabled)
+    had_thinking_hint = any(hint in msg.get("content", "") for msg in messages)
+    if had_thinking_hint:
+        merged_content = _append_thinking_hint(merged_content, hint)
+    
     result = {
-        "content": "\n\n".join(all_contents),
+        "content": merged_content,
         "userInputMessageContext": base_context or {},
         "origin": base_origin or "CLI",
         "modelId": base_model
     }
+    
+    # Add merged toolResults if any
+    if all_tool_results:
+        result["userInputMessageContext"]["toolResults"] = all_tool_results
     
     # Only keep images from the last 2 messages that have images
     if all_images:
@@ -173,7 +211,12 @@ def merge_user_messages(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
     return result
 
 def process_history(messages: List[ClaudeMessage], thinking_enabled: bool = False, hint: str = THINKING_HINT) -> List[Dict[str, Any]]:
-    """Process history messages to match Amazon Q format (alternating user/assistant)."""
+    """Process history messages to match Amazon Q format (alternating user/assistant).
+    
+    Dual-mode detection:
+    - If messages already alternate correctly (no consecutive user/assistant), skip merging
+    - If messages have consecutive same-role messages, apply merge logic
+    """
     history = []
     seen_tool_use_ids = set()
     
@@ -284,29 +327,69 @@ def process_history(messages: List[ClaudeMessage], thinking_enabled: bool = Fals
             
             raw_history.append(entry)
 
-    # Second pass: merge consecutive user messages
+    # Dual-mode detection: check if messages already alternate correctly
+    has_consecutive_same_role = False
+    prev_role = None
+    for item in raw_history:
+        current_role = "user" if "userInputMessage" in item else "assistant"
+        if prev_role == current_role:
+            has_consecutive_same_role = True
+            break
+        prev_role = current_role
+    
+    # If messages already alternate, skip merging (fast path)
+    if not has_consecutive_same_role:
+        logger.info("Messages already alternate correctly, skipping merge logic")
+        return raw_history
+
+    # Second pass: merge consecutive user messages (only if needed)
+    logger.info("Detected consecutive same-role messages, applying merge logic")
     pending_user_msgs = []
     for item in raw_history:
         if "userInputMessage" in item:
             pending_user_msgs.append(item["userInputMessage"])
         elif "assistantResponseMessage" in item:
             if pending_user_msgs:
-                merged = merge_user_messages(pending_user_msgs)
+                merged = merge_user_messages(pending_user_msgs, hint)
                 history.append({"userInputMessage": merged})
                 pending_user_msgs = []
             history.append(item)
             
     if pending_user_msgs:
-        merged = merge_user_messages(pending_user_msgs)
+        merged = merge_user_messages(pending_user_msgs, hint)
         history.append({"userInputMessage": merged})
         
     return history
+
+def _detect_tool_call_loop(messages: List[ClaudeMessage], threshold: int = 3) -> Optional[str]:
+    """Detect if the same tool is being called repeatedly (potential infinite loop)."""
+    recent_tool_calls = []
+    for msg in messages[-10:]:  # Check last 10 messages
+        if msg.role == "assistant" and isinstance(msg.content, list):
+            for block in msg.content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    tool_name = block.get("name")
+                    tool_input = json.dumps(block.get("input", {}), sort_keys=True)
+                    recent_tool_calls.append((tool_name, tool_input))
+
+    if len(recent_tool_calls) >= threshold:
+        # Check if the last N tool calls are identical
+        last_calls = recent_tool_calls[-threshold:]
+        if len(set(last_calls)) == 1:
+            return f"Detected infinite loop: tool '{last_calls[0][0]}' called {threshold} times with same input"
+
+    return None
 
 def convert_claude_to_amazonq_request(req: ClaudeRequest, conversation_id: Optional[str] = None) -> Dict[str, Any]:
     """Convert ClaudeRequest to Amazon Q request body."""
     if conversation_id is None:
         conversation_id = str(uuid.uuid4())
-    
+
+    # Detect infinite tool call loops
+    loop_error = _detect_tool_call_loop(req.messages, threshold=3)
+    if loop_error:
+        raise ValueError(loop_error)
+
     thinking_enabled = is_thinking_mode_enabled(getattr(req, "thinking", None))
         
     # 1. Tools
