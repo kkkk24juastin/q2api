@@ -588,6 +588,24 @@ async def claude_messages(
         processed_history = process_claude_history_for_amazonq(history)
         aq_request["conversationState"]["history"] = processed_history
 
+    # Remove duplicate tail userInputMessage that matches currentMessage content
+    # This prevents the model from repeatedly responding to the same user message
+    conversation_state = aq_request.get("conversationState", {})
+    current_msg = conversation_state.get("currentMessage", {}).get("userInputMessage", {})
+    current_content = (current_msg.get("content") or "").strip()
+    history = conversation_state.get("history", [])
+
+    if history and current_content:
+        last = history[-1]
+        if "userInputMessage" in last:
+            last_content = (last["userInputMessage"].get("content") or "").strip()
+            if last_content and last_content == current_content:
+                # Remove duplicate tail userInputMessage
+                history = history[:-1]
+                aq_request["conversationState"]["history"] = history
+                import logging
+                logging.getLogger(__name__).info("Removed duplicate tail userInputMessage to prevent repeated response")
+
     conversation_state = aq_request.get("conversationState", {})
     conversation_id = conversation_state.get("conversationId")
     response_headers: Dict[str, str] = {}

@@ -12,6 +12,10 @@ def merge_user_messages(user_messages: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     合并多个 userInputMessage 的内容
 
+    IMPORTANT: This function properly merges toolResults from all messages to prevent
+    losing tool execution history, which would cause infinite loops where the model
+    keeps responding to the same user message.
+
     Args:
         user_messages: userInputMessage 列表
 
@@ -26,13 +30,23 @@ def merge_user_messages(user_messages: List[Dict[str, Any]]) -> Dict[str, Any]:
     base_context = None
     base_origin = None
     base_model = None
+    all_tool_results = []  # Collect toolResults from all messages
+    all_images = []  # Collect images from messages
 
     for msg in user_messages:
         content = msg.get("content", "")
+        msg_ctx = msg.get("userInputMessageContext", {})
 
-        # 保留第一个消息的上下文信息
+        # Initialize base context from first message
         if base_context is None:
-            base_context = msg.get("userInputMessageContext", {})
+            base_context = msg_ctx.copy() if msg_ctx else {}
+            # Remove toolResults from base to merge them separately
+            if "toolResults" in base_context:
+                all_tool_results.extend(base_context.pop("toolResults"))
+        else:
+            # Collect toolResults from subsequent messages
+            if "toolResults" in msg_ctx:
+                all_tool_results.extend(msg_ctx["toolResults"])
 
         # 保留第一个消息的 origin
         if base_origin is None:
@@ -46,6 +60,11 @@ def merge_user_messages(user_messages: List[Dict[str, Any]]) -> Dict[str, Any]:
         if content:
             all_contents.append(content)
 
+        # Collect images from each message
+        msg_images = msg.get("images")
+        if msg_images:
+            all_images.append(msg_images)
+
     # 合并内容，使用双换行分隔
     merged_content = "\n\n".join(all_contents)
 
@@ -56,9 +75,21 @@ def merge_user_messages(user_messages: List[Dict[str, Any]]) -> Dict[str, Any]:
         "origin": base_origin or "CLI"
     }
 
+    # Add merged toolResults if any
+    if all_tool_results:
+        merged_msg["userInputMessageContext"]["toolResults"] = all_tool_results
+
     # 如果原始消息有 modelId，也保留
     if base_model:
         merged_msg["modelId"] = base_model
+
+    # Only keep images from the last 2 messages that have images
+    if all_images:
+        kept_images = []
+        for img_list in all_images[-2:]:  # Take last 2 messages' images
+            kept_images.extend(img_list)
+        if kept_images:
+            merged_msg["images"] = kept_images
 
     return merged_msg
 
