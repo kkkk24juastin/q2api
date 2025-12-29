@@ -619,7 +619,7 @@ async def claude_messages(
         if not access:
             refreshed = await refresh_access_token_in_db(account["id"])
             access = refreshed.get("accessToken")
-        
+
         # We call with stream=True to get the event iterator
         _, _, tracker, event_iter = await send_chat_request(
             access_token=access,
@@ -629,7 +629,7 @@ async def claude_messages(
             client=GLOBAL_CLIENT,
             raw_payload=aq_request
         )
-        
+
         if not event_iter:
              raise HTTPException(status_code=502, detail="No event stream returned")
 
@@ -643,7 +643,7 @@ async def claude_messages(
                 for item in req.system:
                     if isinstance(item, dict) and item.get("type") == "text":
                         text_to_count += item.get("text", "")
-        
+
         for msg in req.messages:
             if isinstance(msg.content, str):
                 text_to_count += msg.content
@@ -673,7 +673,7 @@ async def claude_messages(
                     event_type, payload = first_event
                     async for sse in handler.handle_event(event_type, payload):
                         yield sse
-                
+
                 # Process remaining events
                 async for event_type, payload in event_iter:
                     async for sse in handler.handle_event(event_type, payload):
@@ -699,19 +699,19 @@ async def claude_messages(
             # This is a bit complex because we need to reconstruct the full response object
             # For now, let's just support streaming as it's the main use case for Claude Code
             # But to be nice, let's try to support non-streaming by consuming the generator
-            
+
             content_blocks = []
             usage = {"input_tokens": 0, "output_tokens": 0}
             stop_reason = None
-            
+
             # We need to parse the SSE strings back to objects... inefficient but works
             # Or we could refactor handler to yield objects.
             # For now, let's just raise error for non-streaming or implement basic text
             # Claude Code uses streaming.
-            
+
             # Let's implement a basic accumulator from the SSE stream
             final_content = []
-            
+
             async for sse_chunk in event_generator():
                 data_str = None
                 # Each chunk from the generator can have multiple lines ('event:', 'data:').
@@ -720,20 +720,20 @@ async def claude_messages(
                     if line.startswith("data:"):
                         data_str = line[6:].strip()
                         break
-                
+
                 if not data_str or data_str == "[DONE]":
                     continue
-                
+
                 try:
                     data = json.loads(data_str)
                     dtype = data.get("type")
-                    
+
                     if dtype == "content_block_start":
                         idx = data.get("index", 0)
                         while len(final_content) <= idx:
                             final_content.append(None)
                         final_content[idx] = data.get("content_block")
-                    
+
                     elif dtype == "content_block_delta":
                         idx = data.get("index", 0)
                         delta = data.get("delta", {})
@@ -747,7 +747,7 @@ async def claude_messages(
                                 if "partial_json" not in final_content[idx]:
                                     final_content[idx]["partial_json"] = ""
                                 final_content[idx]["partial_json"] += delta.get("partial_json", "")
-                    
+
                     elif dtype == "content_block_stop":
                         idx = data.get("index", 0)
                         if final_content[idx] and final_content[idx].get("type") == "tool_use":
@@ -758,11 +758,11 @@ async def claude_messages(
                                     # Keep partial if invalid
                                     final_content[idx]["input"] = {"error": "invalid json", "partial": final_content[idx]["partial_json"]}
                                 del final_content[idx]["partial_json"]
-                    
+
                     elif dtype == "message_delta":
                         usage = data.get("usage", usage)
                         stop_reason = data.get("delta", {}).get("stop_reason")
-                
+
                 except json.JSONDecodeError:
                     # Ignore lines that are not valid JSON
                     pass
